@@ -1,27 +1,78 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/shirou/gopsutil/v3/cpu"
-	"github.com/shirou/gopsutil/v3/mem"
+	"net" // IP adresi için 
 	"net/http"
+	"os"
+	"os/signal" //graceful shutdown için 
+	"syscall"
+	"time"
+
+	"github.com/shirou/gopsutil/v3/cpu"
+	"github.com/shirou/gopsutil/v3/disk"
+	"github.com/shirou/gopsutil/v3/host"
+	"github.com/shirou/gopsutil/v3/mem"
 )
 
-// json kalıbımız(struct)
+// json şablonumuz(blueprint gibi) (struct)
 type SystemInfo struct {
-	TotalRAM    float32 `json:"toplam_ram_gb"`
-	UsedRAM     float32 `json:"kullanilan_ram_gb"`
-	UsedPercent float32 `json:"ram_kullanim_orani"`
+	OS          string  `json:"isletim_sistemi"` //bellekte string olarak yer tutacak OS adında alan ayır(değişken gibi) ve bu değişkeni json.Marshal yani api ile gönderirken "isletim_sistemi" adında gönder, çünkü frontend(json tarafı) küçük harfli değişkenler kullanıyor
+	Kernel      string  `json:"kernel_surumu"`
+	Hostname    string  `json:"bilgisayar_adi"`
+	Uptime      uint64  `json:"calisma_suresi_sn"`
+	LocalIP     string  `json:"yerel_ip"`
 
-	TotalSwap   float32 `json:"toplam_swap_gb"`
-	UsedSwap    float32 `json:"kullanilan_swap_gb"`
-	SwapPercent float32 `json:"swap_kullanim_orani"`
+	CPUModel    string  `json:"cpu_modeli"`
+	CPUPercent   float32 `json:"cpu_kullanim_orani"`
 
-	CPUPercent  float32 `json:"cpu_kullanim_orani"`
+	RAMPercent   float32 `json:"ram_kullanim_orani"`
+	RAMUsedByte  uint64  `json:"ram_kullanilan_byte"`
+
+	DiskTotalByte uint64  `json:"disk_toplam_byte"`
+	DiskUsedByte  uint64  `json:"disk_kullanilan_byte"`
+	DiskPercent  float32 `json:"disk_kullanim_orani"`
+}
+
+// cihaz IP bulma kodu
+func getLocalIP() (string, error) {
+	addrs, err := net.InterfaceAddrs() //gelen hata err atanır, cevap ise addrs atanır.
+	if err != nil {
+		return "", err //1. değişken(string) boş döndür, 2. değişken(error) err döndür (string, error)
+	}
+
+	for _, address := range addrs { //verilen indexi blank (_) atar, ipleri address e atar
+		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			if ipnet.IP.To4() != nil {
+				return ipnet.IP.String(), nil //1. değişken(string) ip döndür, err olmadığı için null döndür error değişkeni yerine
+			}
+		}
+	}
+
+	return "IP bulunamadi", nil //string'i ip bulunamadı döndür, err null olsun
 }
 
 func statusHandler(w http.ResponseWriter, r *http.Request) {
+
+	//sadece GET metodu izin veriyoruz
+	if r.Method != http.MethodGet {
+        http.Error(w, "Only method GET is allowed", http.StatusMethodNotAllowed)
+        return
+	}
+	// cors izinleri, frontend etkileşime geçebilsin diye
+    w.Header().Set("Access-Control-Allow-Origin", "*") //local olarak çalışacağından herkes girebilsin yapıyoruz
+    w.Header().Set("Access-Control-Allow-Methods", "GET") //sadece GET metoduna izin ver
+    w.Header().Set("Access-Control-Allow-Headers", "Content-Type") // allows Content-Type header for CORS/JSON requests
+
+	// host (sistem) bilgileri
+	hInfo, err := host.Info()
+	if err != nil {
+		http.Error(w, "Host bilgisi okunamadi", http.StatusInternalServerError)
+		return
+	}
+
 	// ram bilgileri
 	v, err := mem.VirtualMemory()
 	if err != nil {
@@ -29,49 +80,96 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// swap alanı bilgileri
-	// s değişkeni bize swap hakkında struct döndürür
-	s, err := mem.SwapMemory()
+	// CPU kullanım bilgileri
+	// ilk parametre ne kadar sürelik bir ölçüm yapacağı
+	// ikinci parametre (false) çekirdek ortalamasını verir
+	cPercent, err := cpu.Percent(100*time.Millisecond, false)
 	if err != nil {
-		http.Error(w, "Swap bilgisi okunamadi", http.StatusInternalServerError)
+		http.Error(w, "CPU kullanim bilgisi okunamadi", http.StatusInternalServerError)
+		return
+	}
+	// işlemci modeli bilgisi
+	cInfo, err := cpu.Info()
+	if err != nil {
+		http.Error(w, "CPU model bilgisi okunamadi", http.StatusInternalServerError)
+		return
+	}
+	//cpu verisi okunamazsa hata verme
+	if len(cPercent) == 0 || len(cInfo) == 0 {
+		http.Error(w, "CPU verisi alinamadi", http.StatusInternalServerError)
 		return
 	}
 
-	// CPU kullanım bilgileri
-	// ilk parametre ne kadar sürelik bir ölçüm yapacağı (0 anlık demektir)
-	// ikinci parametre (false) olansa çekirdeklerin ayrı ayrı kullanımı yerine hepsinin ortalamasını verir
-	c, err := cpu.Percent(0, false)
-	
-	// c değişkeni bir dizi olarak döner, o yüzden ilk elemanını [0] alıyoruz
-	cpuKullanimi := float32(0)
-	if err == nil && len(c) > 0 {
-		cpuKullanimi = float32(c[0])
+	// disk bilgileri (ana dizin)
+	dInfo, err := disk.Usage("/")
+	if err != nil {
+		http.Error(w, "Disk bilgisi okunamadi", http.StatusInternalServerError)
+		return
 	}
 
-	// kalıp (struct) içini ram ve swap bilgilerini koy
+	//ip bulma fonksiyonundan ip veya error alınır
+	localIP, err := getLocalIP()
+	if err != nil {
+		http.Error(w, "Yerel IP bilgisi okunamadi", http.StatusInternalServerError)
+		return
+	}
+
+	// şablon(blueprint) (struct) içini sistem bilgileriyle doldur
 	info := SystemInfo{
-		TotalRAM:    float32(v.Total) / 1024.0 / 1024.0 / 1024.0,
-		UsedRAM:     float32(v.Used) / 1024.0 / 1024.0 / 1024.0,
-		UsedPercent: float32(v.UsedPercent),
+		OS:          hInfo.OS, //şablondaki OS kısmına hInfo.OS içindeki değeri(stringi) yaz, yani şablona verileri doldurmaya başla
+		Kernel:      hInfo.KernelVersion,
+		Hostname:    hInfo.Hostname,
+		Uptime:      hInfo.Uptime,
+		LocalIP:     localIP,
+		CPUModel:    cInfo[0].ModelName,
+		CPUPercent:  float32(cPercent[0]),
+		RAMPercent:   float32(v.UsedPercent),
+		DiskPercent:  float32(dInfo.UsedPercent),
 
-		// swap verilerini de byte'dan GB'a çeviriyoruz
-		TotalSwap:   float32(s.Total) / 1024.0 / 1024.0 / 1024.0,
-		UsedSwap:    float32(s.Used) / 1024.0 / 1024.0 / 1024.0,
-		SwapPercent: float32(s.UsedPercent),
-
-		CPUPercent:  cpuKullanimi,
+		//değerleri byte olarak yolluyoruz, frontend de gösterirken megabyte veya gigabyte'a çevireceğiz
+		RAMUsedByte:  v.Used, 
+		DiskTotalByte: dInfo.Total,
+		DiskUsedByte:  dInfo.Used,
+		
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(info)
+	if err := json.NewEncoder(w).Encode(info); err != nil {
+		fmt.Printf("JSON encode hatasi: %v\n", err) //JSON yaparken sorun çıkarsa error veriyoruz
+	}
 }
 
 func main() {
+	//http server başlatılıyor
 	http.HandleFunc("/api/status", statusHandler)
 
-	fmt.Println("Sunucu 8080 portunda calismaya basladi. http://localhost:8080/api/status adresine gidebilirsin.")
+	srv := &http.Server{
+		Addr:         ":8080",
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  15 * time.Second,
+	}
 
-	err := http.ListenAndServe(":8080", nil)
+	go func() {
+		fmt.Println("Sunucu 8080 portunda calismaya basladi. http://localhost:8080/api/status adresinde.")
+
+		//hata yakalayıcı
+		err := srv.ListenAndServe()
+		if err != nil && err != http.ErrServerClosed {
+			fmt.Println("HATA:", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	<-quit
+
+	fmt.Println("\nKapatma sinyali alindi. Sunucu kapatiliyor...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := srv.Shutdown(ctx)
 	if err != nil {
 		fmt.Println("HATA:", err)
 	}
