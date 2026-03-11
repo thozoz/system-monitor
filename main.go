@@ -9,139 +9,139 @@ import (
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/host"
 	"github.com/shirou/gopsutil/v3/mem"
-	psnet "github.com/shirou/gopsutil/v3/net" //"net" paketiyle aynı ada sahip olduğundan çakışmasını önlemek için psnet dedik
+	psnet "github.com/shirou/gopsutil/v3/net" // give alias psnet to avoid naming conflict with "net" package (they have the same name "net")
 
-	"net" // IP adresi için
+	"net" // for IP address stuff
 	"net/http"
 	"os"
-	"os/signal" //graceful shutdown için
+	"os/signal" // for graceful shutdown
 	"syscall"
 	"time"
 )
 
-// json şablonumuz(blueprint gibi) (struct)
+// the JSON template (blueprint) (struct)
 type SystemInfo struct {
-	OS       string `json:"isletim_sistemi"` // bellekte string tutacak OS adında bi alan (değişken) aç. API'den json olarak yollarken adını "isletim_sistemi" diye değiştir, çünkü frontend tarafı genelde küçük harfli isimlendirme bekliyor.
-	Kernel   string `json:"kernel_surumu"`
-	Hostname string `json:"bilgisayar_adi"`
-	Uptime   uint64 `json:"calisma_suresi_sn"`
-	LocalIP  string `json:"yerel_ip"`
+	OS       string `json:"operating_system"` // allocate an OS field to hold a string. when sending as JSON, rename it to "operating_system" cause the frontend generally wants lowercase names. While go wants uppercase names
+	Kernel   string `json:"kernel_version"`
+	Hostname string `json:"hostname"`
+	Uptime   uint64 `json:"uptime_seconds"`
+	LocalIP  string `json:"local_ip"`
 
-	CPUModel   string  `json:"cpu_modeli"`
-	CPUPercent float32 `json:"cpu_kullanim_orani"`
-	CPUTemp    float32 `json:"cpu_sicaklik_derece"`
+	CPUModel   string  `json:"cpu_model"`
+	CPUPercent float32 `json:"cpu_usage_percent"`
+	CPUTemp    float32 `json:"cpu_temperature_celsius"`
 
-	RAMPercent  float32 `json:"ram_kullanim_orani"`
-	RAMUsedByte uint64  `json:"ram_kullanilan_byte"`
+	RAMPercent  float32 `json:"ram_usage_percent"`
+	RAMUsedByte uint64  `json:"ram_used_bytes"`
 
-	DiskTotalByte uint64  `json:"disk_toplam_byte"`
-	DiskUsedByte  uint64  `json:"disk_kullanilan_byte"`
-	DiskPercent   float32 `json:"disk_kullanim_orani"`
+	DiskTotalByte uint64  `json:"disk_total_bytes"`
+	DiskUsedByte  uint64  `json:"disk_used_bytes"`
+	DiskPercent   float32 `json:"disk_usage_percent"`
 
-	BatteryPrcnt float32 `json:"batarya_yuzdesi"`
-	IsCharging   bool    `json:"sarj_oluyor_mu"`
+	BatteryPercent float32 `json:"battery_percent"`
+	IsCharging     bool    `json:"is_charging"`
 
-	NetSentByte uint64 `json:"ag_gonderilen_byte"`
-	NetRecvByte uint64 `json:"ag_alinan_byte"`
+	NetSentByte uint64 `json:"network_sent_bytes"`
+	NetRecvByte uint64 `json:"network_received_bytes"`
 }
 
-// cihaz IP bulma kodu
+// code to find the device's IP
 func getLocalIP() (string, error) {
-	addrs, err := net.InterfaceAddrs() //gelen hata err atanır, cevap ise addrs atanır.
+	addrs, err := net.InterfaceAddrs() // if error comes in, assign to err, otherwise assign the response to addrs
 	if err != nil {
-		return "", err //1. değişken(string) boş döndür, 2. değişken(error) err döndür (string, error)
+		return "", err // return first variable (string) empty, return second variable (error) err [string, error]
 	}
 
-	for _, address := range addrs { //verilen indexi blank (_) atar, ipleri address e atar
+	for _, address := range addrs { // assign the given index to blank (_), assign the IPs to the address variable
 		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
 			if ipnet.IP.To4() != nil {
-				return ipnet.IP.String(), nil //1. değişken(string) ip döndür, err olmadığı için null döndür error değişkeni yerine
+				return ipnet.IP.String(), nil // return first variable (string) the IP, since there is no error, return nil for error variable
 			}
 		}
 	}
 
-	return "IP bulunamadi", nil //string'i ip bulunamadı döndür, err null olsun
+	return "IP not found", nil // if there is no error nor no IP adress, return string as "IP not found", and return err as nil cause no error
 }
 
 func statusHandler(w http.ResponseWriter, r *http.Request) {
 
-	//sadece GET metodu izin veriyoruz
+	// only allow GET method
 	if r.Method != http.MethodGet {
 		http.Error(w, "Only method GET is allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// CORS izinleri, frontend etkileşime geçebilsin diye
-	w.Header().Set("Access-Control-Allow-Origin", "*")             //local olarak çalışacağından herkes girebilsin yapıyoruz
-	w.Header().Set("Access-Control-Allow-Methods", "GET")          //sadece GET metoduna izin ver
+	// CORS permissions so the frontend can interact with API
+	w.Header().Set("Access-Control-Allow-Origin", "*")             // since it runs locally, allow anyone to access
+	w.Header().Set("Access-Control-Allow-Methods", "GET")          // only allow GET method
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type") // allows Content-Type header for CORS/JSON requests
 
-	// host (sistem) bilgileri
+	// host system information
 	hInfo, err := host.Info()
 	if err != nil {
-		http.Error(w, "Host bilgisi okunamadi", http.StatusInternalServerError)
+		http.Error(w, "Host info could not be read", http.StatusInternalServerError)
 		return
 	}
 
-	// ram bilgileri
+	// RAM information
 	v, err := mem.VirtualMemory()
 	if err != nil {
-		http.Error(w, "RAM bilgisi okunamadi", http.StatusInternalServerError)
+		http.Error(w, "RAM info could not be read", http.StatusInternalServerError)
 		return
 	}
 
-	// CPU kullanım bilgileri
-	// ilk parametre ne kadar sürelik bir ölçüm yapacağı
-	// ikinci parametre (false) çekirdek ortalamasını verir
+	// CPU usage information
+	// 1st parameter: how long to measure core usage
+	// 2nd parameter (false): gives average core usage across cores
 	cPercent, err := cpu.Percent(100*time.Millisecond, false)
 	if err != nil {
-		http.Error(w, "CPU kullanim bilgisi okunamadi", http.StatusInternalServerError)
+		http.Error(w, "CPU usage info could not be read", http.StatusInternalServerError)
 		return
 	}
-	// işlemci modeli bilgisi
+	// CPU model information
 	cInfo, err := cpu.Info()
 	if err != nil {
-		http.Error(w, "CPU model bilgisi okunamadi", http.StatusInternalServerError)
+		http.Error(w, "CPU model info could not be read", http.StatusInternalServerError)
 		return
 	}
-	//cpu verisi okunamazsa hata ver
+	// if one of the CPU data can't be read, throw error
 	if len(cPercent) == 0 || len(cInfo) == 0 {
-		http.Error(w, "CPU verisi alinamadi", http.StatusInternalServerError)
+		http.Error(w, "CPU data could not be read", http.StatusInternalServerError)
 		return
 	}
 
-	// disk bilgileri (ana dizin)
+	// get disk usage for the root filesystem (/)
 	dInfo, err := disk.Usage("/")
 	if err != nil {
-		http.Error(w, "Disk bilgisi okunamadi", http.StatusInternalServerError)
+		http.Error(w, "Disk info could not be read", http.StatusInternalServerError)
 		return
 	}
 
-	//ip bulma fonksiyonundan ip veya error alınır
+	// get IP or error from the IP finding function
 	localIP, err := getLocalIP()
 	if err != nil {
-		http.Error(w, "Yerel IP bilgisi okunamadi", http.StatusInternalServerError)
+		http.Error(w, "Local IP info could not be read", http.StatusInternalServerError)
 		return
 	}
 
-	// ağ trafiği bilgileri (toplam upload/download byte)
+	// network traffic information (total upload/download bytes)
 	netStats, err := psnet.IOCounters(false)
 	if err != nil {
-		http.Error(w, "Ag bilgisi okunamadi", http.StatusInternalServerError)
+		http.Error(w, "Network info could not be read", http.StatusInternalServerError)
 		return
 	}
-	//ağ verisi alınamazsa hata ver
+	// if network data can't be read, throw error
 	if len(netStats) == 0 {
-		http.Error(w, "Ag verisi alinamadi", http.StatusInternalServerError)
+		http.Error(w, "Network data could not be read", http.StatusInternalServerError)
 		return
 	}
 
-	// sıcaklık sensörlerini okuyup en yüksek sıcaklığı alıyoruz
+	// read temperature sensors and grab the highest temperature
 	tempStats, err := host.SensorsTemperatures()
 	if err != nil {
-		http.Error(w, "Sicaklik bilgisi okunamadi", http.StatusInternalServerError)
+		http.Error(w, "Temperature info could not be read", http.StatusInternalServerError)
 		return
 	}
-	//en yüksek dereceyi alıp onu gösteriyoruz
+	// grab the highest temp and show it
 	maxTemp := 0.0
 	for _, temp := range tempStats {
 		if temp.Temperature > maxTemp {
@@ -149,7 +149,7 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// batarya bilgisi laptop olmayan cihazlarda olmayabilir, o yüzden esnek gidiyoruz
+	// battery info may not exist on non-laptop devices, so we handle it flexibly
 	bats, err := battery.GetAll()
 	batPercent := 0.0
 	isCharging := false
@@ -158,9 +158,9 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 		isCharging = (bats[0].State.String() == "Charging")
 	}
 
-	// şablon(blueprint) (struct) içini sistem bilgileriyle doldur
+	// fill the template with system info
 	info := SystemInfo{
-		OS:          hInfo.OS, //şablondaki OS kısmına hInfo.OS içindeki değeri(stringi) yaz, yani şablona verileri doldurmaya başla
+		OS:          hInfo.OS, // write the value from hInfo.OS to the OS field of the template
 		Kernel:      hInfo.KernelVersion,
 		Hostname:    hInfo.Hostname,
 		Uptime:      hInfo.Uptime,
@@ -171,14 +171,14 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 		RAMPercent:  float32(v.UsedPercent),
 		DiskPercent: float32(dInfo.UsedPercent),
 
-		BatteryPrcnt: float32(batPercent),
-		IsCharging:   isCharging,
+		BatteryPercent: float32(batPercent),
+		IsCharging:     isCharging,
 
-		//toplam indirme/yükleme. anlık indirme/yükleme hızını frontend de gösterirken hesaplayacağız
+		// total download/upload, frontend will calculate real time internet speed
 		NetSentByte: netStats[0].BytesSent,
 		NetRecvByte: netStats[0].BytesRecv,
 
-		//değerleri byte olarak yolluyoruz, frontend de gösterirken megabyte veya gigabyte'a çevireceğiz
+		// we send values in bytes, frontend will convert to MB or GB when displaying
 		RAMUsedByte:   v.Used,
 		DiskTotalByte: dInfo.Total,
 		DiskUsedByte:  dInfo.Used,
@@ -186,42 +186,45 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(info); err != nil {
-		fmt.Printf("JSON encode hatasi: %v\n", err) //JSON yaparken sorun çıkarsa hatayı logluyoruz
+		fmt.Printf("JSON encode error: %v\n", err) // if JSON encoding fails, log the error and continue
 	}
 }
 
 func main() {
-	//http server başlatılıyor
+	// starting the HTTP server
 	http.HandleFunc("/api/status", statusHandler)
 
-	srv := &http.Server{
-		Addr:         ":8080",
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  15 * time.Second,
+	srv := &http.Server{ // create an HTTP server with our custom config
+		Addr:         ":8080",          // listen on port 8080
+		ReadTimeout:  10 * time.Second, // max time to read request from client
+		WriteTimeout: 10 * time.Second, // max time to write response to client
+		IdleTimeout:  15 * time.Second, // max time to keep idle connection open
 	}
 
 	go func() {
-		fmt.Println("Sunucu 8080 portunda calismaya basladi. http://localhost:8080/api/status adresinde.")
+		fmt.Println("Server started on port 8080. Available at http://localhost:8080/api/status")
 
-		//hata yakalayıcı
+		// error handler, if the http server couldnt start
 		err := srv.ListenAndServe()
 		if err != nil && err != http.ErrServerClosed {
-			fmt.Println("HATA:", err)
+			fmt.Println("ERROR:", err)
 		}
 	}()
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
-	<-quit
+	quit := make(chan os.Signal, 1) // create a channel to receive OS signals with buffer size 1
 
-	fmt.Println("\nKapatma sinyali alindi. Sunucu kapatiliyor...")
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM) // listen for Ctrl C or termination signals and send them to the quit channel
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	<-quit // block and wait until we receive a signal on the quit channel
 
-	err := srv.Shutdown(ctx)
-	if err != nil {
-		fmt.Println("HATA:", err)
+	fmt.Println("\nShutdown signal received. Server shutting down...") // inform that shutdown is happening
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second) // create a context that times out after 5 seconds for graceful shutdown
+
+	defer cancel() // make sure we clean up the timeout context when we're done
+
+	err := srv.Shutdown(ctx) // gracefully shut down the server within the 5 second timeout
+	if err != nil {          // if shutdown fails print the error
+		fmt.Println("ERROR:", err)
 	}
 }
