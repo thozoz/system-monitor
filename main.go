@@ -4,36 +4,45 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net" // IP adresi için 
-	"net/http"
-	"os"
-	"os/signal" //graceful shutdown için 
-	"syscall"
-	"time"
-
+	"github.com/distatus/battery"
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/host"
 	"github.com/shirou/gopsutil/v3/mem"
+	psnet "github.com/shirou/gopsutil/v3/net" //"net" paketiyle aynı ada sahip olduğundan çakışmasını önlemek için psnet dedik
+
+	"net" // IP adresi için
+	"net/http"
+	"os"
+	"os/signal" //graceful shutdown için
+	"syscall"
+	"time"
 )
 
 // json şablonumuz(blueprint gibi) (struct)
 type SystemInfo struct {
-	OS          string  `json:"isletim_sistemi"` //bellekte string olarak yer tutacak OS adında alan ayır(değişken gibi) ve bu değişkeni json.Marshal yani api ile gönderirken "isletim_sistemi" adında gönder, çünkü frontend(json tarafı) küçük harfli değişkenler kullanıyor
-	Kernel      string  `json:"kernel_surumu"`
-	Hostname    string  `json:"bilgisayar_adi"`
-	Uptime      uint64  `json:"calisma_suresi_sn"`
-	LocalIP     string  `json:"yerel_ip"`
+	OS       string `json:"isletim_sistemi"` // bellekte string tutacak OS adında bi alan (değişken) aç. API'den json olarak yollarken adını "isletim_sistemi" diye değiştir, çünkü frontend tarafı genelde küçük harfli isimlendirme bekliyor.
+	Kernel   string `json:"kernel_surumu"`
+	Hostname string `json:"bilgisayar_adi"`
+	Uptime   uint64 `json:"calisma_suresi_sn"`
+	LocalIP  string `json:"yerel_ip"`
 
-	CPUModel    string  `json:"cpu_modeli"`
-	CPUPercent   float32 `json:"cpu_kullanim_orani"`
+	CPUModel   string  `json:"cpu_modeli"`
+	CPUPercent float32 `json:"cpu_kullanim_orani"`
+	CPUTemp    float32 `json:"cpu_sicaklik_derece"`
 
-	RAMPercent   float32 `json:"ram_kullanim_orani"`
-	RAMUsedByte  uint64  `json:"ram_kullanilan_byte"`
+	RAMPercent  float32 `json:"ram_kullanim_orani"`
+	RAMUsedByte uint64  `json:"ram_kullanilan_byte"`
 
 	DiskTotalByte uint64  `json:"disk_toplam_byte"`
 	DiskUsedByte  uint64  `json:"disk_kullanilan_byte"`
-	DiskPercent  float32 `json:"disk_kullanim_orani"`
+	DiskPercent   float32 `json:"disk_kullanim_orani"`
+
+	BatteryPrcnt float32 `json:"batarya_yuzdesi"`
+	IsCharging   bool    `json:"sarj_oluyor_mu"`
+
+	NetSentByte uint64 `json:"ag_gonderilen_byte"`
+	NetRecvByte uint64 `json:"ag_alinan_byte"`
 }
 
 // cihaz IP bulma kodu
@@ -58,13 +67,13 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 
 	//sadece GET metodu izin veriyoruz
 	if r.Method != http.MethodGet {
-        http.Error(w, "Only method GET is allowed", http.StatusMethodNotAllowed)
-        return
+		http.Error(w, "Only method GET is allowed", http.StatusMethodNotAllowed)
+		return
 	}
-	// cors izinleri, frontend etkileşime geçebilsin diye
-    w.Header().Set("Access-Control-Allow-Origin", "*") //local olarak çalışacağından herkes girebilsin yapıyoruz
-    w.Header().Set("Access-Control-Allow-Methods", "GET") //sadece GET metoduna izin ver
-    w.Header().Set("Access-Control-Allow-Headers", "Content-Type") // allows Content-Type header for CORS/JSON requests
+	// CORS izinleri, frontend etkileşime geçebilsin diye
+	w.Header().Set("Access-Control-Allow-Origin", "*")             //local olarak çalışacağından herkes girebilsin yapıyoruz
+	w.Header().Set("Access-Control-Allow-Methods", "GET")          //sadece GET metoduna izin ver
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type") // allows Content-Type header for CORS/JSON requests
 
 	// host (sistem) bilgileri
 	hInfo, err := host.Info()
@@ -94,7 +103,7 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "CPU model bilgisi okunamadi", http.StatusInternalServerError)
 		return
 	}
-	//cpu verisi okunamazsa hata verme
+	//cpu verisi okunamazsa hata ver
 	if len(cPercent) == 0 || len(cInfo) == 0 {
 		http.Error(w, "CPU verisi alinamadi", http.StatusInternalServerError)
 		return
@@ -114,6 +123,41 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ağ trafiği bilgileri (toplam upload/download byte)
+	netStats, err := psnet.IOCounters(false)
+	if err != nil {
+		http.Error(w, "Ag bilgisi okunamadi", http.StatusInternalServerError)
+		return
+	}
+	//ağ verisi alınamazsa hata ver
+	if len(netStats) == 0 {
+		http.Error(w, "Ag verisi alinamadi", http.StatusInternalServerError)
+		return
+	}
+
+	// sıcaklık sensörlerini okuyup en yüksek sıcaklığı alıyoruz
+	tempStats, err := host.SensorsTemperatures()
+	if err != nil {
+		http.Error(w, "Sicaklik bilgisi okunamadi", http.StatusInternalServerError)
+		return
+	}
+	//en yüksek dereceyi alıp onu gösteriyoruz
+	maxTemp := 0.0
+	for _, temp := range tempStats {
+		if temp.Temperature > maxTemp {
+			maxTemp = temp.Temperature
+		}
+	}
+
+	// batarya bilgisi laptop olmayan cihazlarda olmayabilir, o yüzden esnek gidiyoruz
+	bats, err := battery.GetAll()
+	batPercent := 0.0
+	isCharging := false
+	if err == nil && len(bats) > 0 && bats[0].Full > 0 {
+		batPercent = (bats[0].Current / bats[0].Full) * 100
+		isCharging = (bats[0].State.String() == "Charging")
+	}
+
 	// şablon(blueprint) (struct) içini sistem bilgileriyle doldur
 	info := SystemInfo{
 		OS:          hInfo.OS, //şablondaki OS kısmına hInfo.OS içindeki değeri(stringi) yaz, yani şablona verileri doldurmaya başla
@@ -123,19 +167,26 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 		LocalIP:     localIP,
 		CPUModel:    cInfo[0].ModelName,
 		CPUPercent:  float32(cPercent[0]),
-		RAMPercent:   float32(v.UsedPercent),
-		DiskPercent:  float32(dInfo.UsedPercent),
+		CPUTemp:     float32(maxTemp),
+		RAMPercent:  float32(v.UsedPercent),
+		DiskPercent: float32(dInfo.UsedPercent),
+
+		BatteryPrcnt: float32(batPercent),
+		IsCharging:   isCharging,
+
+		//toplam indirme/yükleme. anlık indirme/yükleme hızını frontend de gösterirken hesaplayacağız
+		NetSentByte: netStats[0].BytesSent,
+		NetRecvByte: netStats[0].BytesRecv,
 
 		//değerleri byte olarak yolluyoruz, frontend de gösterirken megabyte veya gigabyte'a çevireceğiz
-		RAMUsedByte:  v.Used, 
+		RAMUsedByte:   v.Used,
 		DiskTotalByte: dInfo.Total,
 		DiskUsedByte:  dInfo.Used,
-		
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(info); err != nil {
-		fmt.Printf("JSON encode hatasi: %v\n", err) //JSON yaparken sorun çıkarsa error veriyoruz
+		fmt.Printf("JSON encode hatasi: %v\n", err) //JSON yaparken sorun çıkarsa hatayı logluyoruz
 	}
 }
 
