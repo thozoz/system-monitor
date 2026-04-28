@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime" // used to detect the current operating system
+
 	"github.com/distatus/battery"
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/disk"
@@ -28,17 +30,17 @@ type SystemInfo struct {
 	LocalIP  string `json:"local_ip"`
 
 	CPUModel   string  `json:"cpu_model"`
-	CPUPercent float32 `json:"cpu_usage_percent"`
-	CPUTemp    float32 `json:"cpu_temperature_celsius"`
+	CPUPercent float64 `json:"cpu_usage_percent"`
+	CPUTemp    float64 `json:"cpu_temperature_celsius"` // -1 if not available
 
-	RAMPercent  float32 `json:"ram_usage_percent"`
+	RAMPercent  float64 `json:"ram_usage_percent"`
 	RAMUsedByte uint64  `json:"ram_used_bytes"`
 
 	DiskTotalByte uint64  `json:"disk_total_bytes"`
 	DiskUsedByte  uint64  `json:"disk_used_bytes"`
-	DiskPercent   float32 `json:"disk_usage_percent"`
+	DiskPercent   float64 `json:"disk_usage_percent"` // -1 if not available
 
-	BatteryPercent float32 `json:"battery_percent"`
+	BatteryPercent float64 `json:"battery_percent"` // -1 if not available
 	IsCharging     bool    `json:"is_charging"`
 
 	NetSentByte uint64 `json:"network_sent_bytes"`
@@ -109,11 +111,17 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// get disk usage for the root filesystem (/)
-	dInfo, err := disk.Usage("/")
-	if err != nil {
-		http.Error(w, "Disk info could not be read", http.StatusInternalServerError)
-		return
+	// get disk usage — path differs on Windows vs Linux/macOS
+	diskPath := "/"
+	if runtime.GOOS == "windows" {
+		diskPath = "C:\\"
+	}
+	diskTotal, diskUsed, diskPercent := uint64(0), uint64(0), float64(-1)
+	dInfo, err := disk.Usage(diskPath)
+	if err == nil {
+		diskTotal = dInfo.Total
+		diskUsed = dInfo.Used
+		diskPercent = dInfo.UsedPercent
 	}
 
 	// get IP or error from the IP finding function
@@ -124,35 +132,31 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// network traffic information (total upload/download bytes)
+	// 0 if not available, frontend will handle it
+	netSent, netRecv := uint64(0), uint64(0)
 	netStats, err := psnet.IOCounters(false)
-	if err != nil {
-		http.Error(w, "Network info could not be read", http.StatusInternalServerError)
-		return
-	}
-	// if network data can't be read, throw error
-	if len(netStats) == 0 {
-		http.Error(w, "Network data could not be read", http.StatusInternalServerError)
-		return
+	if err == nil && len(netStats) > 0 {
+		netSent = netStats[0].BytesSent
+		netRecv = netStats[0].BytesRecv
 	}
 
 	// read temperature sensors and grab the highest temperature
+	// -1 if not available (e.g. Windows often doesn't expose sensors)
+	maxTemp := float64(-1)
 	tempStats, err := host.SensorsTemperatures()
-	if err != nil {
-		http.Error(w, "Temperature info could not be read", http.StatusInternalServerError)
-		return
-	}
-	// grab the highest temp and show it
-	maxTemp := 0.0
-	for _, temp := range tempStats {
-		if temp.Temperature > maxTemp {
-			maxTemp = temp.Temperature
+	if err == nil {
+		for _, temp := range tempStats {
+			if temp.Temperature > maxTemp {
+				maxTemp = temp.Temperature
+			}
 		}
 	}
 
 	// battery info may not exist on non-laptop devices, so we handle it flexibly
-	bats, err := battery.GetAll()
-	batPercent := 0.0
+	// -1 if not available
+	batPercent := float64(-1)
 	isCharging := false
+	bats, err := battery.GetAll()
 	if err == nil && len(bats) > 0 && bats[0].Full > 0 {
 		batPercent = (bats[0].Current / bats[0].Full) * 100
 		isCharging = (bats[0].State.String() == "Charging")
@@ -160,28 +164,29 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 
 	// fill the template with system info
 	info := SystemInfo{
-		OS:          hInfo.OS, // write the value from hInfo.OS to the OS field of the template
-		Kernel:      hInfo.KernelVersion,
-		Hostname:    hInfo.Hostname,
-		Uptime:      hInfo.Uptime,
-		LocalIP:     localIP,
-		CPUModel:    cInfo[0].ModelName,
-		CPUPercent:  float32(cPercent[0]),
-		CPUTemp:     float32(maxTemp),
-		RAMPercent:  float32(v.UsedPercent),
-		DiskPercent: float32(dInfo.UsedPercent),
+		OS:       hInfo.OS, // write the value from hInfo.OS to the OS field of the template
+		Kernel:   hInfo.KernelVersion,
+		Hostname: hInfo.Hostname,
+		Uptime:   hInfo.Uptime,
+		LocalIP:  localIP,
 
-		BatteryPercent: float32(batPercent),
+		CPUModel:   cInfo[0].ModelName,
+		CPUPercent: cPercent[0],
+		CPUTemp:    maxTemp,
+
+		RAMPercent:  v.UsedPercent,
+		RAMUsedByte: v.Used,
+
+		DiskTotalByte: diskTotal,
+		DiskUsedByte:  diskUsed,
+		DiskPercent:   diskPercent,
+
+		BatteryPercent: batPercent,
 		IsCharging:     isCharging,
 
 		// total download/upload, frontend will calculate real time internet speed
-		NetSentByte: netStats[0].BytesSent,
-		NetRecvByte: netStats[0].BytesRecv,
-
-		// we send values in bytes, frontend will convert to MB or GB when displaying
-		RAMUsedByte:   v.Used,
-		DiskTotalByte: dInfo.Total,
-		DiskUsedByte:  dInfo.Used,
+		NetSentByte: netSent,
+		NetRecvByte: netRecv,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -191,7 +196,7 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	// starting the HTTP server
+	// start the HTTP server
 	http.HandleFunc("/api/status", statusHandler)
 
 	srv := &http.Server{ // create an HTTP server with our custom config
