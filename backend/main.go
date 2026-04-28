@@ -21,6 +21,11 @@ import (
 	"time"
 )
 
+const (
+	portStart = 8080
+	portEnd   = 8100
+)
+
 // the JSON template (blueprint) (struct)
 type SystemInfo struct {
 	OS       string `json:"operating_system"` // allocate an OS field to hold a string. when sending as JSON, rename it to "operating_system" cause the frontend generally wants lowercase names. While go wants uppercase names
@@ -63,6 +68,18 @@ func getLocalIP() (string, error) {
 	}
 
 	return "IP not found", nil // if there is no error nor no IP adress, return string as "IP not found", and return err as nil cause no error
+}
+
+func findAvailablePort(startPort, endPort int) (int, error) {
+	for port := startPort; port <= endPort; port++ {
+		listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+		if err == nil {
+			_ = listener.Close()
+			return port, nil
+		}
+	}
+
+	return 0, fmt.Errorf("no free port found in range %d-%d", startPort, endPort)
 }
 
 func statusHandler(w http.ResponseWriter, r *http.Request) {
@@ -199,15 +216,21 @@ func main() {
 	// start the HTTP server
 	http.HandleFunc("/api/status", statusHandler)
 
+	selectedPort, err := findAvailablePort(portStart, portEnd)
+	if err != nil {
+		fmt.Println("ERROR:", err)
+		return
+	}
+
 	srv := &http.Server{ // create an HTTP server with our custom config
-		Addr:         ":8080",          // listen on port 8080
+		Addr:         fmt.Sprintf(":%d", selectedPort),
 		ReadTimeout:  10 * time.Second, // max time to read request from client
 		WriteTimeout: 10 * time.Second, // max time to write response to client
 		IdleTimeout:  15 * time.Second, // max time to keep idle connection open
 	}
 
 	go func() {
-		fmt.Println("Server started on port 8080. Available at http://localhost:8080/api/status")
+		fmt.Printf("Server started on port %d. Available at http://localhost:%d/api/status\n", selectedPort, selectedPort)
 
 		// error handler, if the http server couldnt start
 		err := srv.ListenAndServe()
@@ -228,8 +251,7 @@ func main() {
 
 	defer cancel() // make sure we clean up the timeout context when we're done
 
-	err := srv.Shutdown(ctx) // gracefully shut down the server within the 5 second timeout
-	if err != nil {          // if shutdown fails print the error
+	if err := srv.Shutdown(ctx); err != nil { // gracefully shut down the server within the 5 second timeout
 		fmt.Println("ERROR:", err)
 	}
 }
