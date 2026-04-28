@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime" // used to detect the current operating system
+	"sync"
 
 	"github.com/distatus/battery"
 	"github.com/shirou/gopsutil/v3/cpu"
@@ -25,6 +26,17 @@ const (
 	portStart = 8080
 	portEnd   = 8100
 )
+
+type MetricsCache struct {
+	sync.RWMutex
+	CPUModel   string
+	CPUPercent float64
+}
+
+var metricsCache = MetricsCache{
+	CPUModel:   "Unknown",
+	CPUPercent: -1,
+}
 
 // the JSON template (blueprint) (struct)
 type SystemInfo struct {
@@ -82,6 +94,34 @@ func findAvailablePort(startPort, endPort int) (int, error) {
 	return 0, fmt.Errorf("no free port found in range %d-%d", startPort, endPort)
 }
 
+func updateCPUMetrics() {
+	cPercent, err := cpu.Percent(1*time.Second, false)
+	if err != nil || len(cPercent) == 0 {
+		return
+	}
+
+	cInfo, err := cpu.Info()
+	if err != nil || len(cInfo) == 0 {
+		return
+	}
+
+	metricsCache.Lock()
+	metricsCache.CPUModel = cInfo[0].ModelName
+	metricsCache.CPUPercent = cPercent[0]
+	metricsCache.Unlock()
+}
+
+func startCPUMetricsUpdater() {
+	updateCPUMetrics()
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		updateCPUMetrics()
+	}
+}
+
 func statusHandler(w http.ResponseWriter, r *http.Request) {
 
 	// only allow GET method
@@ -108,25 +148,10 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// CPU usage information
-	// 1st parameter: how long to measure core usage
-	// 2nd parameter (false): gives average core usage across cores
-	cPercent, err := cpu.Percent(100*time.Millisecond, false)
-	if err != nil {
-		http.Error(w, "CPU usage info could not be read", http.StatusInternalServerError)
-		return
-	}
-	// CPU model information
-	cInfo, err := cpu.Info()
-	if err != nil {
-		http.Error(w, "CPU model info could not be read", http.StatusInternalServerError)
-		return
-	}
-	// if one of the CPU data can't be read, throw error
-	if len(cPercent) == 0 || len(cInfo) == 0 {
-		http.Error(w, "CPU data could not be read", http.StatusInternalServerError)
-		return
-	}
+	metricsCache.RLock()
+	cpuModel := metricsCache.CPUModel
+	cpuPercent := metricsCache.CPUPercent
+	metricsCache.RUnlock()
 
 	// get disk usage — path differs on Windows vs Linux/macOS
 	diskPath := "/"
@@ -187,8 +212,8 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 		Uptime:   hInfo.Uptime,
 		LocalIP:  localIP,
 
-		CPUModel:   cInfo[0].ModelName,
-		CPUPercent: cPercent[0],
+		CPUModel:   cpuModel,
+		CPUPercent: cpuPercent,
 		CPUTemp:    maxTemp,
 
 		RAMPercent:  v.UsedPercent,
@@ -215,6 +240,7 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	// start the HTTP server
 	http.HandleFunc("/api/status", statusHandler)
+	go startCPUMetricsUpdater()
 
 	selectedPort, err := findAvailablePort(portStart, portEnd)
 	if err != nil {
