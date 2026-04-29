@@ -111,14 +111,19 @@ func updateCPUMetrics() {
 	metricsCache.Unlock()
 }
 
-func startCPUMetricsUpdater() {
+func startCPUMetricsUpdater(ctx context.Context) {
 	updateCPUMetrics()
 
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		updateCPUMetrics()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			updateCPUMetrics()
+		}
 	}
 }
 
@@ -136,16 +141,20 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 
 	// host system information
 	hInfo, err := host.Info()
-	if err != nil {
-		http.Error(w, "Host info could not be read", http.StatusInternalServerError)
-		return
+	hOS, hKernel, hHostname, hUptime := "", "", "", uint64(0)
+	if err == nil {
+		hOS = hInfo.OS
+		hKernel = hInfo.KernelVersion
+		hHostname = hInfo.Hostname
+		hUptime = hInfo.Uptime
 	}
 
 	// RAM information
 	v, err := mem.VirtualMemory()
-	if err != nil {
-		http.Error(w, "RAM info could not be read", http.StatusInternalServerError)
-		return
+	ramPercent, ramUsed := float64(0), uint64(0)
+	if err == nil {
+		ramPercent = v.UsedPercent
+		ramUsed = v.Used
 	}
 
 	metricsCache.RLock()
@@ -169,8 +178,7 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 	// get IP or error from the IP finding function
 	localIP, err := getLocalIP()
 	if err != nil {
-		http.Error(w, "Local IP info could not be read", http.StatusInternalServerError)
-		return
+		localIP = "unavailable"
 	}
 
 	// network traffic information (total upload/download bytes)
@@ -206,18 +214,18 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 
 	// fill the template with system info
 	info := SystemInfo{
-		OS:       hInfo.OS, // write the value from hInfo.OS to the OS field of the template
-		Kernel:   hInfo.KernelVersion,
-		Hostname: hInfo.Hostname,
-		Uptime:   hInfo.Uptime,
+		OS:       hOS,
+		Kernel:   hKernel,
+		Hostname: hHostname,
+		Uptime:   hUptime,
 		LocalIP:  localIP,
 
 		CPUModel:   cpuModel,
 		CPUPercent: cpuPercent,
 		CPUTemp:    maxTemp,
 
-		RAMPercent:  v.UsedPercent,
-		RAMUsedByte: v.Used,
+		RAMPercent:  ramPercent,
+		RAMUsedByte: ramUsed,
 
 		DiskTotalByte: diskTotal,
 		DiskUsedByte:  diskUsed,
@@ -240,7 +248,8 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	// start the HTTP server
 	http.HandleFunc("/api/status", statusHandler)
-	go startCPUMetricsUpdater()
+	cpuUpdaterCtx, stopCPUUpdater := context.WithCancel(context.Background())
+	go startCPUMetricsUpdater(cpuUpdaterCtx)
 
 	selectedPort, err := findAvailablePort(portStart, portEnd)
 	if err != nil {
@@ -270,6 +279,7 @@ func main() {
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM) // listen for Ctrl C or termination signals and send them to the quit channel
 
 	<-quit // block and wait until we receive a signal on the quit channel
+	stopCPUUpdater()
 
 	fmt.Println("\nShutdown signal received. Server shutting down...") // inform that shutdown is happening
 
