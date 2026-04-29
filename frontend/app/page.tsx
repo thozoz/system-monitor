@@ -76,7 +76,6 @@ function StatCard({
 export default function Dashboard() {
   const [sysInfo, setSysInfo] = useState<SystemInfo | null>(null);
   const [error, setError] = useState(false);
-  const [prevNet, setPrevNet] = useState<{ sent: number; recv: number } | null>(null);
   const [netSpeed, setNetSpeed] = useState<{ up: number; down: number }>({ up: 0, down: 0 });
 
   useEffect(() => {
