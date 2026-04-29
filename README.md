@@ -4,8 +4,7 @@ A real-time system monitoring dashboard built with a **Go** backend and **Next.j
 
 Built as a learning project to explore Go's standard library, goroutines, and system-level programming.
 
-<!-- Screenshot placeholder: replace with an actual screenshot of the dashboard -->
-<!-- ![Dashboard Screenshot](screenshot.png) -->
+![Dashboard Screenshot](screenshot.png)
 
 ## Features
 
