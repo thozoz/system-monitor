@@ -23,6 +23,7 @@ type SystemInfo = {
 };
 
 function formatBytes(bytes: number): string {
+  if (bytes <= 0) return "0 B";
   if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(1) + " GB";
   if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + " MB";
   return (bytes / 1024).toFixed(1) + " KB";
@@ -88,8 +89,8 @@ export default function Dashboard() {
           setSysInfo((prev) => {
             if (prev) {
               setNetSpeed({
-                up: data.network_sent_bytes - prev.network_sent_bytes,
-                down: data.network_received_bytes - prev.network_received_bytes,
+                up: (data.network_sent_bytes - prev.network_sent_bytes) / 2,
+                down: (data.network_received_bytes - prev.network_received_bytes) / 2,
               });
             }
             return data;
