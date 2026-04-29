@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime" // used to detect the current operating system
+	"strconv"
 	"sync"
 
 	"github.com/distatus/battery"
@@ -20,11 +21,12 @@ import (
 	"os/signal" // for graceful shutdown
 	"syscall"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
 const (
 	portStart = 8080
-	portEnd   = 8100
 )
 
 type MetricsCache struct {
@@ -80,18 +82,6 @@ func getLocalIP() (string, error) {
 	}
 
 	return "IP not found", nil // if there is no error nor no IP adress, return string as "IP not found", and return err as nil cause no error
-}
-
-func findAvailablePort(startPort, endPort int) (int, error) {
-	for port := startPort; port <= endPort; port++ {
-		listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-		if err == nil {
-			_ = listener.Close()
-			return port, nil
-		}
-	}
-
-	return 0, fmt.Errorf("no free port found in range %d-%d", startPort, endPort)
 }
 
 func updateCPUMetrics() {
@@ -247,14 +237,30 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	// start the HTTP server
+	_ = godotenv.Load()
 	http.HandleFunc("/api/status", statusHandler)
 	cpuUpdaterCtx, stopCPUUpdater := context.WithCancel(context.Background())
 	go startCPUMetricsUpdater(cpuUpdaterCtx)
 
-	selectedPort, err := findAvailablePort(portStart, portEnd)
-	if err != nil {
-		fmt.Println("ERROR:", err)
-		return
+	// If PORT environment variable is set, use that fixed port (fail fast if invalid or unavailable).
+	selectedPort := 0
+	if envPort := os.Getenv("PORT"); envPort != "" {
+		p, err := strconv.Atoi(envPort)
+		if err != nil {
+			fmt.Println("ERROR: invalid PORT value:", err)
+			return
+		}
+		// try to listen to ensure the port is available (or the user expects to bind there)
+		listener, err := net.Listen("tcp", fmt.Sprintf(":%d", p))
+		if err != nil {
+			fmt.Printf("ERROR: port %d is not available: %v\n", p, err)
+			return
+		}
+		_ = listener.Close()
+		selectedPort = p
+	} else {
+		// no PORT env set — use default start port
+		selectedPort = portStart
 	}
 
 	srv := &http.Server{ // create an HTTP server with our custom config
